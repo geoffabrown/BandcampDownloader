@@ -16,7 +16,7 @@
   <PropertyGroup>
     <ApplicationIcon>Resources\Cloud.ico</ApplicationIcon>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFramework>net9.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
   </PropertyGroup>
 

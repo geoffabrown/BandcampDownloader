@@ -13,12 +13,14 @@ internal sealed class EnumerationExtension : MarkupExtension
         public object Value { get; set; }
     }
 
+    private Type _enumType;
+
     public Type EnumType
     {
-        get;
+        get => _enumType;
         private init
         {
-            if (field == value)
+            if (_enumType == value)
             {
                 return;
             }
@@ -29,7 +31,7 @@ internal sealed class EnumerationExtension : MarkupExtension
                 throw new ArgumentException("Type must be an Enum.");
             }
 
-            field = value;
+            _enumType = value;
         }
     }
 

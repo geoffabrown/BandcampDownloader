@@ -272,49 +272,59 @@ internal sealed class DownloadManager : IDownloadManager
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var downloadService = new DownloadService();
-
-            // Update progress bar when downloading
-            downloadService.DownloadProgressChanged += (_, args) =>
+            // Use using statement to ensure DownloadService is properly disposed and file handles are released
+            using (var downloadService = new DownloadService())
             {
-                currentFile.BytesReceived = args.ReceivedBytesSize;
-            };
-
-            // Start download
-            try
-            {
-                if (track.Path == null)
+                // Update progress bar when downloading
+                downloadService.DownloadProgressChanged += (_, args) =>
                 {
-                    throw new InvalidOperationException("Track path is null");
-                }
+                    currentFile.BytesReceived = args.ReceivedBytesSize;
+                };
 
-                DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedArgs($"Downloading track \"{track.Title}\" from url: {track.Mp3Url}", DownloadProgressChangedLevel.VerboseInfo));
-                await downloadService.DownloadFileTaskAsync(track.Mp3Url, track.Path, cancellationToken).ConfigureAwait(false);
-                cancellationToken.ThrowIfCancellationRequested(); // See https://github.com/bezzad/Downloader/issues/203
-                trackDownloaded = true;
-                DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedArgs($"Downloaded track \"{track.Title}\" from url: {track.Mp3Url}", DownloadProgressChangedLevel.VerboseInfo));
-            }
-            catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.TooManyRequests)
-            {
-                // Connection closed probably because no response from Bandcamp
-                _logger.Error(ex);
+                // Start download
+                try
+                {
+                    if (track.Path == null)
+                    {
+                        throw new InvalidOperationException("Track path is null");
+                    }
 
-                if (tries + 1 < _userSettings.DownloadMaxTries)
-                {
-                    DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedArgs($"Unable to download track \"{Path.GetFileName(track.Path)}\" from album \"{album.Title}\". Try {tries + 1} of {_userSettings.DownloadMaxTries}", DownloadProgressChangedLevel.Warning));
+                    DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedArgs($"Downloading track \"{track.Title}\" from url: {track.Mp3Url}", DownloadProgressChangedLevel.VerboseInfo));
+                    await downloadService.DownloadFileTaskAsync(track.Mp3Url, track.Path, cancellationToken).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested(); // See https://github.com/bezzad/Downloader/issues/203
+                    
+                    trackDownloaded = true;
+                    DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedArgs($"Downloaded track \"{track.Title}\" from url: {track.Mp3Url}", DownloadProgressChangedLevel.VerboseInfo));
                 }
-                else
+                catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.TooManyRequests)
                 {
-                    DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedArgs($"Unable to download track \"{Path.GetFileName(track.Path)}\" from album \"{album.Title}\". Hit max retries of {_userSettings.DownloadMaxTries}", DownloadProgressChangedLevel.Error));
+                    // Connection closed probably because no response from Bandcamp
+                    _logger.Error(ex);
+
+                    if (tries + 1 < _userSettings.DownloadMaxTries)
+                    {
+                        DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedArgs($"Unable to download track \"{Path.GetFileName(track.Path)}\" from album \"{album.Title}\". Try {tries + 1} of {_userSettings.DownloadMaxTries}", DownloadProgressChangedLevel.Warning));
+                    }
+                    else
+                    {
+                        DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedArgs($"Unable to download track \"{Path.GetFileName(track.Path)}\" from album \"{album.Title}\". Hit max retries of {_userSettings.DownloadMaxTries}", DownloadProgressChangedLevel.Error));
+                    }
                 }
-            }
+            } // DownloadService is disposed here, ensuring file handles are released
 
             if (trackDownloaded)
             {
+                // Wait for the file to be available for writing before attempting to tag
+                var fileAvailable = await FileHelper.WaitForFileAvailableAsync(track.Path, maxWaitTimeMs: 2000, retryDelayMs: 50, cancellationToken).ConfigureAwait(false);
+                if (!fileAvailable)
+                {
+                    _logger.Warn($"File {track.Path} is still locked after waiting. Attempting to tag anyway...");
+                }
+
                 if (_userSettings.ModifyTags ||
                     (_userSettings.SaveCoverArtInTags && artwork != null))
                 {
-                    _tagService.SaveTagsInTrack(track, album, artwork, cancellationToken);
+                    await _tagService.SaveTagsInTrackAsync(track, album, artwork, cancellationToken).ConfigureAwait(false);
                     DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedArgs($"Tags saved for track \"{Path.GetFileName(track.Path)}\" from album \"{album.Title}\"", DownloadProgressChangedLevel.VerboseInfo));
                 }
 
@@ -360,39 +370,41 @@ internal sealed class DownloadManager : IDownloadManager
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var downloadService = new DownloadService();
-
-            // Update progress bar when downloading
-            downloadService.DownloadProgressChanged += (_, args) =>
+            // Use using statement to ensure DownloadService is properly disposed
+            using (var downloadService = new DownloadService())
             {
-                currentFile.BytesReceived = args.ReceivedBytesSize;
-            };
-
-            // Start download
-            DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedArgs($"Downloading artwork from url: {album.ArtworkUrl}", DownloadProgressChangedLevel.VerboseInfo));
-
-            try
-            {
-                await using var artworkStream = await downloadService.DownloadFileTaskAsync(album.ArtworkUrl, cancellationToken).ConfigureAwait(false);
-                cancellationToken.ThrowIfCancellationRequested(); // See https://github.com/bezzad/Downloader/issues/203
-
-                artwork = await artworkStream.ToArrayAsync(cancellationToken).ConfigureAwait(false);
-                artworkDownloaded = true;
-            }
-            catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.TooManyRequests)
-            {
-                // Connection closed probably because no response from Bandcamp
-                _logger.Error(ex);
-
-                if (tries < _userSettings.DownloadMaxTries)
+                // Update progress bar when downloading
+                downloadService.DownloadProgressChanged += (_, args) =>
                 {
-                    DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedArgs($"Unable to download artwork for album \"{album.Title}\". Try {tries + 1} of {_userSettings.DownloadMaxTries}", DownloadProgressChangedLevel.Warning));
-                }
-                else
+                    currentFile.BytesReceived = args.ReceivedBytesSize;
+                };
+
+                // Start download
+                DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedArgs($"Downloading artwork from url: {album.ArtworkUrl}", DownloadProgressChangedLevel.VerboseInfo));
+
+                try
                 {
-                    DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedArgs($"Unable to download artwork for album \"{album.Title}\". Hit max retries of {_userSettings.DownloadMaxTries}", DownloadProgressChangedLevel.Error));
+                    await using var artworkStream = await downloadService.DownloadFileTaskAsync(album.ArtworkUrl, cancellationToken).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested(); // See https://github.com/bezzad/Downloader/issues/203
+
+                    artwork = await artworkStream.ToArrayAsync(cancellationToken).ConfigureAwait(false);
+                    artworkDownloaded = true;
                 }
-            }
+                catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.TooManyRequests)
+                {
+                    // Connection closed probably because no response from Bandcamp
+                    _logger.Error(ex);
+
+                    if (tries < _userSettings.DownloadMaxTries)
+                    {
+                        DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedArgs($"Unable to download artwork for album \"{album.Title}\". Try {tries + 1} of {_userSettings.DownloadMaxTries}", DownloadProgressChangedLevel.Warning));
+                    }
+                    else
+                    {
+                        DownloadProgressChanged?.Invoke(this, new DownloadProgressChangedArgs($"Unable to download artwork for album \"{album.Title}\". Hit max retries of {_userSettings.DownloadMaxTries}", DownloadProgressChangedLevel.Error));
+                    }
+                }
+            } // DownloadService is disposed here
 
             if (artworkDownloaded)
             {
