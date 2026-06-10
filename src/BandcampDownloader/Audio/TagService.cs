@@ -1,5 +1,7 @@
 ﻿using System;
+using System.IO;
 using System.Threading;
+using System.Threading.Tasks;
 using BandcampDownloader.Model;
 using BandcampDownloader.Settings;
 using TagLib;
@@ -9,33 +11,69 @@ namespace BandcampDownloader.Audio;
 
 internal interface ITagService
 {
-    void SaveTagsInTrack(Track track, Album album, byte[] artwork, CancellationToken cancellationToken);
+    Task SaveTagsInTrackAsync(Track track, Album album, byte[] artwork, CancellationToken cancellationToken);
 }
 
 internal sealed class TagService : ITagService
 {
     private readonly IUserSettings _userSettings;
+    private const int MaxRetries = 5;
+    private const int RetryDelayMs = 100;
 
     public TagService(ISettingsService settingsService)
     {
         _userSettings = settingsService.GetUserSettings();
     }
 
-    public void SaveTagsInTrack(Track track, Album album, byte[] artwork, CancellationToken cancellationToken)
+    public async Task SaveTagsInTrackAsync(Track track, Album album, byte[] artwork, CancellationToken cancellationToken)
     {
-        var tagFile = File.Create(track.Path);
+        File tagFile = null;
+        var retries = 0;
+        var success = false;
 
-        if (_userSettings.ModifyTags)
+        while (!success && retries < MaxRetries)
         {
-            tagFile = UpdateStringTags(tagFile, track, album);
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                tagFile = File.Create(track.Path);
+
+                if (_userSettings.ModifyTags)
+                {
+                    tagFile = UpdateStringTags(tagFile, track, album);
+                }
+
+                if (_userSettings.SaveCoverArtInTags && artwork != null)
+                {
+                    tagFile = UpdateCoverArtTag(tagFile, artwork);
+                }
+
+                tagFile.Save();
+                success = true;
+            }
+            catch (IOException) when (retries < MaxRetries - 1)
+            {
+                // File might be locked, retry after a short delay
+                retries++;
+                var delay = RetryDelayMs * retries; // Exponential backoff
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                // Always dispose the file object after each attempt
+                if (tagFile != null)
+                {
+                    tagFile.Dispose();
+                    tagFile = null;
+                }
+            }
         }
 
-        if (_userSettings.SaveCoverArtInTags && artwork != null)
+        if (!success)
         {
-            tagFile = UpdateCoverArtTag(tagFile, artwork);
+            throw new IOException($"Failed to save tags to track file after {MaxRetries} attempts: {track.Path}");
         }
-
-        tagFile.Save();
     }
 
     private File UpdateStringTags(File tagFile, Track track, Album album)

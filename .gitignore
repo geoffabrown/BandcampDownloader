@@ -16,3 +16,4 @@ _ReSharper*
 
 # Temporary csproj during build
 *wpftmp.csproj
+.vs/
